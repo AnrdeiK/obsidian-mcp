@@ -12,37 +12,53 @@ MCP server for working with markdown notes through Claude Code.
 
 ## Installation
 
-```bash
-# Clone and build
-cd ~/Devs/mcp-notes
-go build -o mcp-notes .
+### 1. Build the binary
 
-# Or install to GOPATH/bin
+```bash
+cd ~/Devs/mcp-notes
 go install .
 ```
 
 Binary will be at `~/go/bin/mcp-notes`.
 
-## Configuration
+### 2. Create Claude Code plugin
 
-Add to `~/.claude.json` under `mcpServers`:
+Create the plugin directory structure:
+
+```bash
+mkdir -p ~/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/notes/.claude-plugin
+```
+
+Create `.claude-plugin/plugin.json`:
 
 ```json
 {
-  "mcpServers": {
-    "notes": {
-      "type": "stdio",
-      "command": "/home/you/go/bin/mcp-notes",
-      "args": ["/path/to/your/notes"],
-      "env": {}
-    }
+  "name": "notes",
+  "description": "Obsidian-style markdown notes MCP server",
+  "author": {
+    "name": "your-name"
   }
 }
 ```
 
-> **Note:** The `~/.claude/mcp.json` file does not work for global servers. Use `~/.claude.json` instead.
+Create `.mcp.json` (in the notes folder, not in .claude-plugin):
 
-Restart Claude Code after changing the config.
+```json
+{
+  "notes": {
+    "command": "/home/you/go/bin/mcp-notes",
+    "args": ["/path/to/your/notes"]
+  }
+}
+```
+
+### 3. Restart Claude Code
+
+```bash
+claude --resume
+```
+
+The `mcp__notes__*` tools will now be available to Claude and all agents.
 
 ## Tools
 
