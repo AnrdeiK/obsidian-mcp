@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // NoteInfo represents metadata about a note
@@ -40,8 +41,9 @@ type Vault interface {
 var _ Vault = (*vault)(nil)
 
 type vault struct {
-	basePath string
-	cache    *Cache
+	basePath    string
+	cache       CacheInterface
+	regexCache  sync.Map // map[string]*regexp.Regexp for compiled regex patterns
 }
 
 // NewVault creates a new vault instance
@@ -69,7 +71,52 @@ func NewVault(basePath string) (Vault, error) {
 	}, nil
 }
 
+// getOrCompileRegex retrieves a compiled regex from cache or compiles and caches it
+func (v *vault) getOrCompileRegex(pattern string) (*regexp.Regexp, error) {
+	// Try to load from cache
+	if cached, ok := v.regexCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+
+	// Compile new regex
+	compiled, err := regexp.Compile("(?i)" + pattern) // Case-insensitive
+	if err != nil {
+		return nil, fmt.Errorf("invalid query regex: %w", err)
+	}
+
+	// Store in cache
+	v.regexCache.Store(pattern, compiled)
+	return compiled, nil
+}
+
+// validateSubpath validates a subpath and returns the full filesystem path
+// Used by List() and Search() for directory validation
+func (v *vault) validateSubpath(subpath string) (string, error) {
+	if subpath == "" {
+		return v.basePath, nil
+	}
+
+	// Clean the path to resolve . and ..
+	cleaned := filepath.Clean(subpath)
+
+	// Check for path traversal attempts
+	if strings.Contains(cleaned, "..") {
+		return "", ErrPathTraversal
+	}
+
+	// Build full path
+	fullPath := filepath.Join(v.basePath, cleaned)
+
+	// Ensure the resolved path is still within basePath
+	if !strings.HasPrefix(fullPath, v.basePath) {
+		return "", ErrPathTraversal
+	}
+
+	return fullPath, nil
+}
+
 // validatePath ensures the path is safe and returns the full filesystem path
+// Used for individual note operations (Read, Create, Update)
 func (v *vault) validatePath(path string) (string, error) {
 	if path == "" {
 		return "", ErrInvalidPath
@@ -101,19 +148,10 @@ func (v *vault) validatePath(path string) (string, error) {
 
 // List returns all notes in the given subpath
 func (v *vault) List(ctx context.Context, subpath string, recursive bool) ([]NoteInfo, error) {
-	// Build search directory
-	searchPath := v.basePath
-	if subpath != "" {
-		cleaned := filepath.Clean(subpath)
-		if strings.Contains(cleaned, "..") {
-			return nil, ErrPathTraversal
-		}
-		searchPath = filepath.Join(v.basePath, cleaned)
-	}
-
-	// Ensure search path is within vault
-	if !strings.HasPrefix(searchPath, v.basePath) {
-		return nil, ErrPathTraversal
+	// Validate and build search directory
+	searchPath, err := v.validateSubpath(subpath)
+	if err != nil {
+		return nil, err
 	}
 
 	var notes []NoteInfo
@@ -182,28 +220,19 @@ func (v *vault) List(ctx context.Context, subpath string, recursive bool) ([]Not
 
 // Search finds notes matching the query and optional tag filters
 func (v *vault) Search(ctx context.Context, query, subpath string, tags []string) ([]NoteInfo, error) {
-	// Build search directory
-	searchPath := v.basePath
-	if subpath != "" {
-		cleaned := filepath.Clean(subpath)
-		if strings.Contains(cleaned, "..") {
-			return nil, ErrPathTraversal
-		}
-		searchPath = filepath.Join(v.basePath, cleaned)
+	// Validate and build search directory
+	searchPath, err := v.validateSubpath(subpath)
+	if err != nil {
+		return nil, err
 	}
 
-	// Ensure search path is within vault
-	if !strings.HasPrefix(searchPath, v.basePath) {
-		return nil, ErrPathTraversal
-	}
-
-	// Compile query regex if provided
+	// Get or compile query regex if provided
 	var queryRegex *regexp.Regexp
 	if query != "" {
 		var err error
-		queryRegex, err = regexp.Compile("(?i)" + query) // Case-insensitive
+		queryRegex, err = v.getOrCompileRegex(query)
 		if err != nil {
-			return nil, fmt.Errorf("invalid query regex: %w", err)
+			return nil, err
 		}
 	}
 
@@ -294,9 +323,23 @@ func (v *vault) Search(ctx context.Context, query, subpath string, tags []string
 
 // Read returns the content of a note
 func (v *vault) Read(ctx context.Context, path string) (string, error) {
+	// Check context cancellation before starting
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+
 	fullPath, err := v.validatePath(path)
 	if err != nil {
 		return "", err
+	}
+
+	// Check context cancellation before I/O
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
 	}
 
 	// Check if file exists
@@ -311,6 +354,13 @@ func (v *vault) Read(ctx context.Context, path string) (string, error) {
 	// Check cache first
 	if entry, ok := v.cache.Get(fullPath); ok {
 		return entry.Content, nil
+	}
+
+	// Check context cancellation before file read
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
 	}
 
 	// Read from filesystem
