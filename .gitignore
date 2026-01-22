@@ -1,0 +1,17 @@
+# Binary
+mcp-notes
+
+# Test coverage
+coverage.out
+
+# Claude
+.claude/
+CLAUDE.md
+
+# MCP tools cache
+.serena/
+.ragcode/
+
+# IDE
+.idea/
+.vscode/
